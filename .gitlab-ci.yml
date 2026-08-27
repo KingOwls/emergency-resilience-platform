@@ -1,0 +1,49 @@
+stages: [validate, build, deploy]
+
+variables:
+  AWS_REGION: us-east-1
+  SAM_CLI_TELEMETRY: "0"
+
+secret_scan:
+  stage: validate
+  image: alpine:3.20
+  script:
+    - '! grep -RIE --exclude-dir=.git --exclude="*.example.json" "AKIA[0-9A-Z]{16}|service_role.*eyJ|password=.*[^*]" .'
+
+compose_config:
+  stage: validate
+  image: docker:27-cli
+  services: [docker:27-dind]
+  script:
+    - ./scripts/bootstrap-local.sh
+    - docker compose config >/dev/null
+
+build_images:
+  stage: build
+  image: docker:27-cli
+  services: [docker:27-dind]
+  script:
+    - ./scripts/bootstrap-local.sh
+    - docker compose build
+
+# Configura un rol IAM para GitLab OIDC y define AWS_DEPLOY_ROLE_ARN en GitLab CI/CD.
+deploy_backend:
+  stage: deploy
+  image: public.ecr.aws/sam/build-nodejs22.x:latest
+  id_tokens:
+    GITLAB_OIDC_TOKEN:
+      aud: https://gitlab.com
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+  script:
+    - |
+      read AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN <<< "$(aws sts assume-role-with-web-identity \
+        --role-arn "$AWS_DEPLOY_ROLE_ARN" \
+        --role-session-name "gitlab-${CI_PIPELINE_ID}" \
+        --web-identity-token "$GITLAB_OIDC_TOKEN" \
+        --duration-seconds 3600 \
+        --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' --output text)"
+      export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+    - sam validate --template-file infrastructure/aws/template.yaml --lint
+    - sam build --template-file infrastructure/aws/template.yaml --parallel
+    - sam deploy --resolve-image-repos --capabilities CAPABILITY_IAM --no-confirm-changeset --no-fail-on-empty-changeset --stack-name emergency-resilience-prod --parameter-overrides AllowedOrigin="$VERCEL_ORIGIN" BudgetEmail="$BUDGET_EMAIL" BudgetLimit=10 CanaryEnabled="${CANARY_ENABLED:-true}"

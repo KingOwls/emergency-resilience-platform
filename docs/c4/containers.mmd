@@ -1,0 +1,13 @@
+flowchart LR
+ U[Browser/PWA] --> F[Frontend Docker]
+ F --> G[Local Gateway Docker]
+ G --> I[Intake Docker]
+ G --> D[Dispatch Docker]
+ G --> Z[Geospatial Docker]
+ G --> N[Notification Docker]
+ I --> DB[(PostgreSQL/PostGIS Docker)]
+ D --> DB
+ Z --> DB
+ N --> DB
+ I -. outbox .-> N
+ D -. outbox .-> N

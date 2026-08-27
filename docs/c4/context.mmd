@@ -1,0 +1,9 @@
+C4Context
+ title Contexto - RESCUE CO
+ Person(citizen, "Ciudadano", "Radica solicitudes aun con conectividad degradada")
+ Person(operator, "Operador", "Coordina recursos")
+ System(system, "Emergency Resilience Platform", "Triage, despacho, geoespacial y notificaciones")
+ System_Ext(responders, "Organismos de socorro", "Cruz Roja, Bomberos, Defensa Civil, UNGRD")
+ Rel(citizen, system, "Reporta emergencia")
+ Rel(operator, system, "Gestiona respuesta")
+ Rel(system, responders, "Coordina estado/recursos")

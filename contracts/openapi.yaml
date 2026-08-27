@@ -1,0 +1,122 @@
+openapi: 3.0.3
+info:
+  title: Emergency Resilience Platform API
+  version: 2.0.0
+servers:
+  - url: http://localhost:8080
+    description: Docker local gateway
+paths:
+  /v1/emergencias:
+    post:
+      summary: Radicar y clasificar una emergencia
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EmergencyRequest' }
+      responses:
+        '201': { description: Emergencia creada }
+        '200': { description: Reintento idempotente }
+        '400': { description: Payload inválido }
+        '401': { description: No autenticado }
+  /v1/emergencias/mias:
+    get:
+      summary: Emergencias visibles para el usuario autenticado
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Lista filtrada por RLS }
+  /v1/emergencias/zona/{ciudad}:
+    get:
+      summary: Agregación geoespacial y recursos por ciudad
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: ciudad
+          required: true
+          schema: { type: string, enum: [CHOCO, PEREIRA, CALI, MANIZALES] }
+      responses:
+        '200': { description: Emergencias, hotspots y recursos }
+        '403': { description: Solo operador }
+  /v1/despachos:
+    post:
+      summary: Asignar el recurso disponible más cercano
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [emergency_id]
+              properties:
+                emergency_id: { type: string, format: uuid }
+      responses:
+        '201': { description: Recurso asignado }
+        '403': { description: Solo operador }
+        '409': { description: Sin recurso o ya existe despacho activo }
+  /v1/despachos/{id}:
+    patch:
+      summary: Actualizar estado de despacho
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [ASSIGNED, EN_ROUTE, ON_SCENE, COMPLETED, CANCELLED] }
+      responses:
+        '200': { description: Estado actualizado }
+  /v1/notificaciones:
+    get:
+      summary: Consultar notificaciones visibles según RLS
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Notificaciones }
+  /v1/webhooks:
+    get:
+      summary: Listar suscripciones webhook (operador)
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Suscripciones }
+    post:
+      summary: Registrar webhook de organismo (operador)
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [city, target_url]
+              properties:
+                city: { type: string, enum: [CHOCO, PEREIRA, CALI, MANIZALES] }
+                target_url: { type: string, format: uri }
+      responses:
+        '201': { description: Suscripción creada }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    EmergencyRequest:
+      type: object
+      required: [type, city, latitude, longitude, critical_data, idempotency_key]
+      properties:
+        type: { type: string, enum: [USAR_MEDICAL, SHELTER, SUPPLIES, DAMAGE_ASSESSMENT] }
+        city: { type: string, enum: [CHOCO, PEREIRA, CALI, MANIZALES] }
+        latitude: { type: number, minimum: -90, maximum: 90 }
+        longitude: { type: number, minimum: -180, maximum: 180 }
+        idempotency_key: { type: string, minLength: 8 }
+        critical_data: { type: object, additionalProperties: true }

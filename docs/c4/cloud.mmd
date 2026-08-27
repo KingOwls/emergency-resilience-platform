@@ -1,0 +1,19 @@
+flowchart LR
+ V[Vercel] --> A[API Gateway prod]
+ A --> I[Lambda Intake OCI]
+ A --> D[Lambda Dispatch OCI]
+ A --> Z[Lambda Geo OCI]
+ A --> N[Lambda Notification OCI]
+ I --> S[(Supabase/PostGIS)]
+ D --> S
+ Z --> S
+ N --> S
+ I --> E[EventBridge]
+ D --> E
+ E --> Q[SQS]
+ Q --> N
+ Q --> DLQ[DLQ]
+ SM[Secrets Manager/SSM] --> I
+ SM --> D
+ SM --> Z
+ SM --> N

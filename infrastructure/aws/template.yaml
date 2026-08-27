@@ -1,0 +1,329 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Emergency Resilience Platform v2 - backend serverless production
+
+Parameters:
+  AllowedOrigin:
+    Type: String
+    Description: Dominio HTTPS del frontend Vercel
+  BudgetEmail:
+    Type: String
+    Description: Correo que recibe alertas de presupuesto
+  BudgetLimit:
+    Type: Number
+    Default: 10
+  CanaryEnabled:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "false"
+    Description: Primera subida en false; desde la segunda versión usar true.
+
+Conditions:
+  UseCanary: !Equals [!Ref CanaryEnabled, "true"]
+
+Globals:
+  Function:
+    Timeout: 10
+    MemorySize: 512
+    Architectures: [x86_64]
+    Tracing: Active
+
+Resources:
+  EmergencyApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: emergency-resilience-api
+      StageName: prod
+      TracingEnabled: true
+      Cors:
+        AllowMethods: "'GET,POST,PATCH,OPTIONS'"
+        AllowHeaders: "'Authorization,Content-Type,Idempotency-Key'"
+        AllowOrigin: !Sub "'${AllowedOrigin}'"
+      MethodSettings:
+        - ResourcePath: "/*"
+          HttpMethod: "*"
+          ThrottlingRateLimit: 50
+          ThrottlingBurstLimit: 100
+          MetricsEnabled: true
+          LoggingLevel: INFO
+
+  EventBus:
+    Type: AWS::Events::EventBus
+    Properties:
+      Name: emergency-prod
+
+  NotificationDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: emergency-notification-dlq
+      MessageRetentionPeriod: 1209600
+
+  NotificationQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: emergency-notification
+      VisibilityTimeout: 60
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt NotificationDLQ.Arn
+        maxReceiveCount: 5
+
+  EventToNotificationRule:
+    Type: AWS::Events::Rule
+    Properties:
+      EventBusName: !Ref EventBus
+      EventPattern:
+        source: ["rescue.platform"]
+        detail-type: ["emergency.created", "dispatch.assigned", "dispatch.updated"]
+      Targets:
+        - Arn: !GetAtt NotificationQueue.Arn
+          Id: NotificationQueueTarget
+
+  NotificationQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues: [!Ref NotificationQueue]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: events.amazonaws.com }
+            Action: sqs:SendMessage
+            Resource: !GetAtt NotificationQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !GetAtt EventToNotificationRule.Arn
+
+  IntakeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      AutoPublishAlias: prod
+      DeploymentPreference:
+        Enabled: !If [UseCanary, true, false]
+        Type: Canary10Percent5Minutes
+        Alarms: [!Ref IntakeErrors, !Ref ApiLatency]
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: [secretsmanager:GetSecretValue]
+              Resource: !Sub arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:emergency/prod/database*
+            - Effect: Allow
+              Action: [ssm:GetParameter]
+              Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/emergency/prod/runtime
+            - Effect: Allow
+              Action: [events:PutEvents]
+              Resource: !GetAtt EventBus.Arn
+      Events:
+        CreateEmergency:
+          Type: Api
+          Properties: { RestApiId: !Ref EmergencyApi, Path: /v1/emergencias, Method: post }
+        MyEmergencies:
+          Type: Api
+          Properties: { RestApiId: !Ref EmergencyApi, Path: /v1/emergencias/mias, Method: get }
+    Metadata:
+      DockerContext: ../../backend/services/intake-triage
+      Dockerfile: Dockerfile.lambda
+      DockerTag: v2
+
+  DispatchFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      AutoPublishAlias: prod
+      DeploymentPreference:
+        Enabled: !If [UseCanary, true, false]
+        Type: Canary10Percent5Minutes
+        Alarms: [!Ref DispatchErrors, !Ref ApiLatency]
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: [secretsmanager:GetSecretValue]
+              Resource: !Sub arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:emergency/prod/database*
+            - Effect: Allow
+              Action: [ssm:GetParameter]
+              Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/emergency/prod/runtime
+            - Effect: Allow
+              Action: [events:PutEvents]
+              Resource: !GetAtt EventBus.Arn
+      Events:
+        CreateDispatch:
+          Type: Api
+          Properties: { RestApiId: !Ref EmergencyApi, Path: /v1/despachos, Method: post }
+        UpdateDispatch:
+          Type: Api
+          Properties: { RestApiId: !Ref EmergencyApi, Path: "/v1/despachos/{id}", Method: patch }
+    Metadata:
+      DockerContext: ../../backend/services/dispatch-resource
+      Dockerfile: Dockerfile.lambda
+      DockerTag: v2
+
+  GeospatialFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      AutoPublishAlias: prod
+      DeploymentPreference:
+        Enabled: !If [UseCanary, true, false]
+        Type: Canary10Percent5Minutes
+        Alarms: [!Ref GeospatialErrors, !Ref ApiLatency]
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: [secretsmanager:GetSecretValue]
+              Resource: !Sub arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:emergency/prod/database*
+            - Effect: Allow
+              Action: [ssm:GetParameter]
+              Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/emergency/prod/runtime
+      Events:
+        Zone:
+          Type: Api
+          Properties: { RestApiId: !Ref EmergencyApi, Path: "/v1/emergencias/zona/{ciudad}", Method: get }
+    Metadata:
+      DockerContext: ../../backend/services/geospatial-zone
+      Dockerfile: Dockerfile.lambda
+      DockerTag: v2
+
+  NotificationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      AutoPublishAlias: prod
+      DeploymentPreference:
+        Enabled: !If [UseCanary, true, false]
+        Type: Canary10Percent5Minutes
+        Alarms: [!Ref NotificationErrors, !Ref ApiLatency]
+      Policies:
+        - SQSPollerPolicy: { QueueName: !GetAtt NotificationQueue.QueueName }
+        - Statement:
+            - Effect: Allow
+              Action: [secretsmanager:GetSecretValue]
+              Resource: !Sub arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:emergency/prod/database*
+            - Effect: Allow
+              Action: [ssm:GetParameter]
+              Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/emergency/prod/runtime
+      Events:
+        ListNotifications:
+          Type: Api
+          Properties: { RestApiId: !Ref EmergencyApi, Path: /v1/notificaciones, Method: get }
+        ListWebhooks:
+          Type: Api
+          Properties: { RestApiId: !Ref EmergencyApi, Path: /v1/webhooks, Method: get }
+        CreateWebhook:
+          Type: Api
+          Properties: { RestApiId: !Ref EmergencyApi, Path: /v1/webhooks, Method: post }
+        Queue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt NotificationQueue.Arn
+            BatchSize: 10
+        OutboxRecovery:
+          Type: Schedule
+          Properties:
+            Schedule: rate(1 minute)
+            Enabled: true
+    Metadata:
+      DockerContext: ../../backend/services/notification-status
+      Dockerfile: Dockerfile.lambda
+      DockerTag: v2
+
+  IntakeErrors:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: emergency-intake-errors
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions: [{ Name: FunctionName, Value: !Ref IntakeFunction }]
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  DispatchErrors:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: emergency-dispatch-errors
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions: [{ Name: FunctionName, Value: !Ref DispatchFunction }]
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  GeospatialErrors:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: emergency-geospatial-errors
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions: [{ Name: FunctionName, Value: !Ref GeospatialFunction }]
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  NotificationErrors:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: emergency-notification-errors
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions: [{ Name: FunctionName, Value: !Ref NotificationFunction }]
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  ApiLatency:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: emergency-api-latency-1500ms
+      Namespace: AWS/ApiGateway
+      MetricName: Latency
+      Dimensions:
+        - { Name: ApiName, Value: emergency-resilience-api }
+        - { Name: Stage, Value: prod }
+      ExtendedStatistic: p95
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1500
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  CostBudget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: emergency-resilience-monthly
+        BudgetLimit: { Amount: !Ref BudgetLimit, Unit: USD }
+        BudgetType: COST
+        TimeUnit: MONTHLY
+      NotificationsWithSubscribers:
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 50
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref BudgetEmail
+        - Notification:
+            NotificationType: FORECASTED
+            ComparisonOperator: GREATER_THAN
+            Threshold: 85
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref BudgetEmail
+
+Outputs:
+  ApiUrl:
+    Value: !Sub https://${EmergencyApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/prod

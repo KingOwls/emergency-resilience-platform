@@ -1,0 +1,170 @@
+name: emergency-resilience-v2
+
+secrets:
+  db_password:
+    file: ./.local-secrets/db_password
+
+volumes:
+  emergency_db_data:
+
+networks:
+  edge:
+  backend:
+    internal: true
+  data:
+    internal: true
+
+services:
+  db:
+    build: ./database
+    image: emergency-db:local
+    environment:
+      POSTGRES_DB: emergency
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    secrets:
+      - db_password
+    volumes:
+      - emergency_db_data:/var/lib/postgresql/data
+    ports:
+      - "55432:5432"
+    networks:
+      - data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d emergency"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
+  intake-triage:
+    build:
+      context: ./backend/services/intake-triage
+      target: local
+    image: emergency-intake:local
+    environment: &backend_env
+      LOCAL_DOCKER: "true"
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_NAME: emergency
+      DB_USER: postgres
+      DB_PASSWORD_FILE: /run/secrets/db_password
+    secrets:
+      - db_password
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "3101:3000"
+    networks: [backend, data]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/health/ready >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  dispatch-resource:
+    build:
+      context: ./backend/services/dispatch-resource
+      target: local
+    image: emergency-dispatch:local
+    environment: *backend_env
+    secrets: [db_password]
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "3102:3000"
+    networks: [backend, data]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/health/ready >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  geospatial-zone:
+    build:
+      context: ./backend/services/geospatial-zone
+      target: local
+    image: emergency-geospatial:local
+    environment: *backend_env
+    secrets: [db_password]
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "3103:3000"
+    networks: [backend, data]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/health/ready >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  notification-status:
+    build:
+      context: ./backend/services/notification-status
+      target: local
+    image: emergency-notification:local
+    environment: *backend_env
+    secrets: [db_password]
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "3104:3000"
+    networks: [backend, data]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/health/ready >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  webhook-sink:
+    build: ./tools/webhook-sink
+    image: emergency-webhook-sink:local
+    ports:
+      - "3200:3200"
+    networks: [backend]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3200/health >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  gateway:
+    build: ./infrastructure/local-gateway
+    image: emergency-gateway:local
+    depends_on:
+      intake-triage: { condition: service_healthy }
+      dispatch-resource: { condition: service_healthy }
+      geospatial-zone: { condition: service_healthy }
+      notification-status: { condition: service_healthy }
+    ports:
+      - "8080:8080"
+    networks: [edge, backend]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/health >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    image: emergency-frontend:local
+    ports:
+      - "3000:80"
+    networks: [edge]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/health >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped

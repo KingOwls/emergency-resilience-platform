@@ -1,0 +1,6 @@
+{
+  "dbSsl": true,
+  "queryTimeoutMs": 3000,
+  "supabaseUrl": "https://YOUR_PROJECT.supabase.co",
+  "eventBusName": "emergency-prod"
+}
